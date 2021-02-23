@@ -32,5 +32,6 @@ $application->registerRoutes($this, [
 	],
 	'ocs' => [
 		['name' => 'Federation#getWopiUrl', 'url' => '/api/v1/federation', 'verb' => 'GET'],
+		['name' => 'Federation#getRemoteWopiInfo', 'url' => '/api/v1/federation', 'verb' => 'POST'],
 	]
 ]);

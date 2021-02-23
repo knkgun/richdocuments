@@ -405,7 +405,7 @@ class DocumentController extends Controller {
 
 		if (!empty($remoteWopiSrc)) {
 			$version = '0'; // FIXME
-			$serverHost = $this->request->getServerProtocol() . '://' . $this->request->getServerHost();
+			$serverHost = \OC::$server->getURLGenerator()->getAbsoluteURL('/');
 			$wopi = $this->getWopiInfoForAuthUser($file->getId(), $version, $this->uid);
 
 			$url = rtrim($remote, '/') . '/index.php/apps/richdocuments/remote' .
@@ -1301,6 +1301,40 @@ class DocumentController extends Controller {
 	}
 
 	/**
+	*
+	* @param string $remote addres of a remote server
+	* @param string $remoteToken wopi access token from a remote server
+	* @return array with additional wopi information
+	*/
+	private function getRemoteWopiInfo($remote, $remoteToken) {
+		if (!$this->isTrustedServer($remote)) {
+			$this->logger->info("Server {server} is not trusted.", ["server" => $remote]);
+			return null;
+		}
+
+		try {
+			$client = \OC::$server->getHTTPClientService()->newClient();
+			$url = $remote . '/ocs/v2.php/apps/richdocuments/api/v1/federation?format=json';
+
+			$response = $client->post($url, [
+				'timeout' => 5,
+				'body' => [
+					'token' => $remoteToken
+				]
+			]);
+
+			$responseBody = $response->getBody();
+			$data = \json_decode($responseBody, true, 512);
+
+			return $data['ocs']['data'];
+		} catch (\Throwable $e) {
+			$this->logger->info('Cannot get the wopi info from remote server: ' . $remote, ['exception' => $e]);
+		}
+
+		return null;
+	}
+
+	/**
 	* @PublicPage
 	* @NoCSRFRequired
 	*
@@ -1315,13 +1349,22 @@ class DocumentController extends Controller {
 			if ($share->getNodeType() == 'file') {
 				$fileId = $share->getNodeId();
 				$currentUser = $this->uid;
-				$permissions = $share->getPermissions();
+
+				$remoteWopiInfo = $this->getRemoteWopiInfo($remoteServer, $remoteServerToken);
+				if ($remoteWopiInfo === null) {
+					$params = ['errors' => [['error' => 'Failed to get information from remote server ' . $remoteServer]]];
+					return new TemplateResponse('core', 'error', $params, 'guest');
+				}
 
 				$doc = $this->getDocumentByShareToken($shareToken, $fileId);
-
 				if ($doc == null) {
 					$this->logger->warning("Null returned for document with fileid {fileid}", ["fileid" => $fileId]);
-					return [];
+					return new TemplateResponse('core', '404', [], 'guest');
+				}
+
+				$permissions = $share->getPermissions();
+				if (!$remoteWopiInfo['canwrite']) {
+					$permissions = $permissions & ~ Constants::PERMISSION_UPDATE;
 				}
 
 				$wopiInfo = $this->getWopiInfoForPublicLink($doc['fileid'], $doc['version'], $doc['path'], $permissions, $currentUser, $doc['owner']);
@@ -1368,7 +1411,8 @@ class DocumentController extends Controller {
 			}
 		} catch (Throwable $e) {
 			$this->logger->warn('Failed to open shared resource', ['app' => $this->appName]);
-			return new TemplateResponse('core', 'error', [], 'guest');
+			$params = ['errors' => [['error' => $e->getMessage()]]];
+			return new TemplateResponse('core', 'error', $params, 'guest');
 		}
 
 		return new TemplateResponse('core', '403', [], 'guest');
