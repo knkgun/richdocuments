@@ -37,6 +37,7 @@ use \OCA\Richdocuments\Storage;
 use \OCA\Richdocuments\Http\DownloadResponse;
 use \OCA\Richdocuments\Http\ResponseException;
 use OCP\IUserManager;
+use OCP\Share\IManager;
 
 use OCA\Federation\TrustedServers;
 
@@ -57,6 +58,7 @@ class DocumentController extends Controller {
 	 * @var IUserManager
 	 */
 	private $userManager;
+	private $shareManager;
 	const ODT_TEMPLATE_PATH = '/assets/odttemplate.odt';
 
 	// Signifies LOOL that document has been changed externally in this storage
@@ -73,7 +75,8 @@ class DocumentController extends Controller {
 								Storage $storage,
 								IAppManager $appManager,
 								IGroupManager $groupManager,
-								IUserManager $userManager) {
+								IUserManager $userManager,
+								IManager $shareManager) {
 		parent::__construct($appName, $request);
 		$this->uid = $uid;
 		$this->l10n = $l10n;
@@ -85,6 +88,7 @@ class DocumentController extends Controller {
 		$this->appManager = $appManager;
 		$this->groupManager = $groupManager;
 		$this->userManager = $userManager;
+		$this->shareManager = $shareManager;
 	}
 
 	/**
@@ -418,6 +422,23 @@ class DocumentController extends Controller {
 		return '';
 	}
 
+	private function getWebSocket($wopiRemote) {
+		if (($parts = \parse_url($wopiRemote)) && isset($parts['scheme'], $parts['host'])) {
+			$webSocketProtocol = "ws://";
+			if ($parts['scheme'] == "https") {
+				$webSocketProtocol = "wss://";
+			}
+			$webSocket = \sprintf(
+				"%s%s%s",
+				$webSocketProtocol,
+				$parts['host'],
+				isset($parts['port']) ? ":" . $parts['port'] : "");
+			return $webSocket;
+		}
+
+		return null;
+	}
+
 	/**
 	 * Get collabora document template for:
 	 * - the base template if both fileId and shareToken are null
@@ -448,19 +469,9 @@ class DocumentController extends Controller {
 
 		// Handle general response
 		$wopiRemote = $this->getWopiUrl($this->isTester());
-		if (($parts = \parse_url($wopiRemote)) && isset($parts['scheme'], $parts['host'])) {
-			$webSocketProtocol = "ws://";
-			if ($parts['scheme'] == "https") {
-				$webSocketProtocol = "wss://";
-			}
-			$webSocket = \sprintf(
-				"%s%s%s",
-				$webSocketProtocol,
-				$parts['host'],
-				isset($parts['port']) ? ":" . $parts['port'] : "");
-		} else {
+		$webSocket = $this->getWebSocket($wopiRemote);
+		if ($webSocket == null)
 			return $this->responseError($this->l10n->t('Collabora Online: Invalid URL "%s".', [$wopiRemote]), $this->l10n->t('Please ask your administrator to check the Collabora Online server setting.'));
-		}
 
 		\OC::$server->getNavigationManager()->setActiveEntry('richdocuments_index');
 		$retVal = [
@@ -1287,5 +1298,79 @@ class DocumentController extends Controller {
 			return $files[0];
 		}
 		return null;
+	}
+
+	/**
+	* @PublicPage
+	* @NoCSRFRequired
+	*
+	* @param string $shareToken share token for a requested resource
+	* @param string $remoteServer addres of a remote server
+	* @param string $remoteServerToken wopi access token from a remote server
+	* @return TemplateResponse
+	*/
+	public function remote($shareToken, $remoteServer, $remoteServerToken) {
+		try {
+			$share = $this->shareManager->getShareByToken($shareToken);
+			if ($share->getNodeType() == 'file') {
+				$fileId = $share->getNodeId();
+				$currentUser = $this->uid;
+				$permissions = $share->getPermissions();
+
+				$doc = $this->getDocumentByShareToken($shareToken, $fileId);
+
+				if ($doc == null) {
+					$this->logger->warning("Null returned for document with fileid {fileid}", ["fileid" => $fileId]);
+					return [];
+				}
+
+				$wopiInfo = $this->getWopiInfoForPublicLink($doc['fileid'], $doc['version'], $doc['path'], $permissions, $currentUser, $doc['owner']);
+
+				// FIXME: In public links allow max 100MB
+				$maxUploadFilesize = 100000000;
+
+				$wopiRemote = $this->getWopiUrl($this->isTester());
+				$webSocket = $this->getWebSocket($wopiRemote);
+				if ($webSocket == null)
+					return $this->responseError($this->l10n->t('Collabora Online: Invalid URL "%s".', [$wopiRemote]), $this->l10n->t('Please ask your administrator to check the Collabora Online server setting.'));
+
+				$docIndex = [
+					'enable_previews' => $this->settings->getSystemValue('enable_previews', true),
+					'wopi_url' => $webSocket,
+					'doc_format' => $this->appConfig->getAppValue('doc_format'),
+					'instanceId' => $this->settings->getSystemValue('instanceid'),
+					'canonical_webroot' => $this->appConfig->getAppValue('canonical_webroot'),
+					'show_custom_header' => true,  // public link should show a customer header without buttons
+
+					'permissions' => $permissions,
+					'uploadMaxFilesize' => $maxUploadFilesize,
+					'uploadMaxHumanFilesize' => \OCP\Util::humanFileSize($maxUploadFilesize),
+					'title' => $doc['name'],
+					'fileId' => $doc['fileid'],
+					'instanceId' => $doc['instanceid'],
+					'version' => $doc['version'],
+					'sessionId' => $wopiInfo['sessionid'],
+					'access_token' => $wopiInfo['access_token'],
+					'access_token_ttl' => $wopiInfo['access_token_ttl'],
+					'urlsrc' => $doc['urlsrc'],
+					'path' => $doc['path']
+				];
+
+				$response = new TemplateResponse('richdocuments', 'documents', $docIndex, 'empty');
+				$response->addHeader('X-Frame-Options', 'ALLOW');
+
+				$policy = new ContentSecurityPolicy();
+				$policy->addAllowedFrameDomain($this->domainOnly($wopiRemote));
+				$policy->allowInlineScript(true);
+				$response->setContentSecurityPolicy($policy);
+
+				return $response;
+			}
+		} catch (Throwable $e) {
+			$this->logger->warn('Failed to open shared resource', ['app' => $this->appName]);
+			return new TemplateResponse('core', 'error', [], 'guest');
+		}
+
+		return new TemplateResponse('core', '403', [], 'guest');
 	}
 }
