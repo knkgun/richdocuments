@@ -371,13 +371,13 @@ class DocumentController extends Controller {
 	 * @return string with the wopi src Url
 	 */
 	private function getRemoteWopiSrc($remote) {
-		if (strpos($remote, 'http://') === false && strpos($remote, 'https://') === false)
-			$remote = 'https://' . $remote;
+		// if (strpos($remote, 'http://') === false && strpos($remote, 'https://') === false)
+		// 	$remote = 'https://' . $remote;
 
-		if (!$this->isTrustedServer($remote)) {
-			$this->logger->info("Server {server} is not trusted.", ["server" => $remote]);
-			return '';
-		}
+		// if (!$this->isTrustedServer($remote)) {
+		// 	$this->logger->info("Server {server} is not trusted.", ["server" => $remote]);
+		// 	return '';
+		// }
 
 		try {
 			$getWopiSrcUrl = $remote . '/ocs/v2.php/apps/richdocuments/api/v1/federation?format=json';
@@ -1307,10 +1307,10 @@ class DocumentController extends Controller {
 	* @return array with additional wopi information
 	*/
 	private function getRemoteWopiInfo($remote, $remoteToken) {
-		if (!$this->isTrustedServer($remote)) {
-			$this->logger->info("Server {server} is not trusted.", ["server" => $remote]);
-			return null;
-		}
+		// if (!$this->isTrustedServer($remote)) {
+		// 	$this->logger->info("Server {server} is not trusted.", ["server" => $remote]);
+		// 	return null;
+		// }
 
 		try {
 			$client = \OC::$server->getHTTPClientService()->newClient();
